@@ -1,0 +1,133 @@
+<!-- static/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Clark County Property Lookup</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    body { font-family: system-ui, Arial; max-width:900px; margin:24px auto; }
+    input, button { padding:8px; margin:4px; }
+    #result {
+      white-space:pre-wrap;
+      background:#fafafa;
+      padding:12px;
+      border:1px solid #eee;
+      margin-top:12px;
+    }
+    #map {
+      height: 400px;
+      margin-top: 12px;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <h2>Clark County Property Lookup (demo)</h2>
+  <div>
+    <label>Address:
+      <input id="addr" size="50" placeholder="e.g. 111 W 8th St, Vancouver, WA">
+    </label>
+    <button onclick="searchAddress()">Search</button>
+  </div>
+  <div>
+    <label>Or Parcel / PAN:
+      <input id="parcel" placeholder="050490000">
+    </label>
+    <button onclick="searchParcel()">Find Parcel</button>
+  </div>
+
+  <div id="result">Results will appear here.</div>
+  <div id="map"></div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin="">
+  </script>
+
+  <script>
+  let map;
+  let marker;
+
+  function initMap(lat = 45.6387, lon = -122.6615) { // default: somewhere in Clark County
+    map = L.map('map').setView([lat, lon], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+  }
+
+  function updateMap(lat, lon, label) {
+    if (!map) {
+      initMap(lat, lon);
+    } else {
+      map.setView([lat, lon], 17);
+    }
+    if (marker) {
+      map.removeLayer(marker);
+    }
+    marker = L.marker([lat, lon]).addTo(map)
+      .bindPopup(label || 'Location')
+      .openPopup();
+  }
+
+  function setResult(text){ document.getElementById('result').textContent = text; }
+  function appendResult(text){ document.getElementById('result').textContent += "\n\n" + text; }
+
+  async function searchAddress() {
+    const a = document.getElementById('addr').value.trim();
+    if (!a) return alert('enter address');
+    setResult('Geocoding...');
+    const g = await fetch('/api/geocode?q=' + encodeURIComponent(a)).then(r => r.json());
+    setResult(JSON.stringify(g, null, 2));
+
+    if (g.candidates && g.candidates.length > 0) {
+      const c = g.candidates[0];
+      const y = c.location.y, x = c.location.x;
+      appendResult(`\nFound candidate: ${c.address} (score ${c.score})\nQuerying parcel by location...`);
+
+      // update map
+      updateMap(y, x, c.address);
+
+      const p = await fetch(`/api/find_parcel?lat=${y}&lon=${x}`).then(r => r.json());
+      appendResult(JSON.stringify(p, null, 2));
+
+      // try to extract parcel number for links if present
+      const firstFeat = p.result?.features?.[0] || p.features?.[0];
+      const parcelId =
+        firstFeat?.attributes?.PARCEL_NUMBER ||
+        firstFeat?.attributes?.PAN ||
+        '';
+
+      const links = await fetch(`/api/links?parcel=${encodeURIComponent(parcelId)}`)
+        .then(r => r.json());
+      appendResult("\nHelpful links:\n" + JSON.stringify(links, null, 2));
+    } else {
+      appendResult('\nNo geocode candidates. Try including city and ZIP (e.g. "821 NW 175th Way, Ridgefield, WA 98642").');
+    }
+  }
+
+  async function searchParcel() {
+    const parcel = document.getElementById('parcel').value.trim();
+    if (!parcel) return alert('enter parcel');
+    setResult('Searching parcel...');
+    const p = await fetch('/api/find_parcel?parcel=' + encodeURIComponent(parcel)).then(r => r.json());
+    setResult(JSON.stringify(p, null, 2));
+
+    const links = await fetch(`/api/links?parcel=${encodeURIComponent(parcel)}`).then(r => r.json());
+    appendResult("\nHelpful links:\n" + JSON.stringify(links, null, 2));
+
+    // NOTE: we don't have lat/lon directly from parcel-only search,
+    // so we only update the map when doing address-based searches for now.
+  }
+
+  // initialize map at startup
+  initMap();
+  </script>
+</body>
+</html>
