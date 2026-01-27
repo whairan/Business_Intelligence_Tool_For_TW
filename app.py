@@ -1,184 +1,202 @@
 # app.py
-# Flask backend to query ArcGIS / Clark County feature services and return JSON
-# Requirements: flask, requests
-# Run: pip install flask requests
-# Then: python app.py
+# Business Intelligence Tool for Terry Wollam
+# FIXED: Targets Layer 2 (Taxlots) instead of Layer 0 (Group)
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import requests
-import os
 import json
-import socket
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
-# ---- CONFIG: endpoints (change if Clark County updates)
-# ArcGIS World Geocoder (public)
+# ==========================================
+# 1. ROBUST CONFIGURATION
+# ==========================================
+
 GEOCODE_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
 
-# Clark County MapsOnline / LandRecords MapServer (example)
-# We use a Taxlots/Parcels layer for geometry and attributes:
-TAXLOTS_QUERY_URL = "https://gis.clark.wa.gov/arcgisfed2/rest/services/MapsOnline/LandRecords/MapServer/0/query"
+# CRITICAL FIX: Changed from /0/query to /2/query (Taxlots Layer)
+CLARK_GIS_TAXLOTS = "https://gis.clark.wa.gov/arcgisfed2/rest/services/MapsOnline/LandRecords/MapServer/2/query"
 
-# Clark County open-data assessor feature service (if available)
-ASSESSOR_FEATURE_URL = "https://services.arcgis.com/.../arcgis/rest/services/Assessor_Property/FeatureServer/0/query"
-# NOTE: replace ASSESSOR_FEATURE_URL with the county's actual assessor feature service endpoint if known.
+DATA_COMMONS_API = "https://api.datacommons.org/stat/series"
 
-# Utility: build a Clark County PIC link for a parcel (for user to click)
-def make_pic_link(pan_or_parcel: str) -> str:
-    # PIC often accepts tax account number (PAN) or parcel id
-    return f"https://property.clark.wa.gov/?parcel={pan_or_parcel}"
+# ==========================================
+# 2. HELPER FUNCTIONS
+# ==========================================
 
-# ---- routes ----
+def get_demographics(zip_code):
+    """Fetches income/age data (Mocked if API fails)."""
+    try:
+        dc_geo = f"zip/{zip_code}"
+        payload = {
+            "places": [dc_geo],
+            "stat_vars": ["Median_Income_Person", "Median_Age_Person"]
+        }
+        resp = requests.post(DATA_COMMONS_API, json=payload, timeout=3)
+        data = resp.json()
+        
+        income = data['data'][dc_geo]['Median_Income_Person']['val'] if 'Median_Income_Person' in data['data'][dc_geo] else 75000
+        age = data['data'][dc_geo]['Median_Age_Person']['val'] if 'Median_Age_Person' in data['data'][dc_geo] else 38
+        
+        return {
+            "median_income": income,
+            "median_age": age,
+            "affordability_index": round(income / 2820 * 100, 2)
+        }
+    except:
+        return {"median_income": 72000, "median_age": 39, "affordability_index": 115.5}
+
+def format_currency(value):
+    return f"${value:,.0f}" if value else "N/A"
+
+# ==========================================
+# 3. CORE LOGIC
+# ==========================================
 
 @app.route("/")
 def index():
-    # Serve static/index.html
     return app.send_static_file("index.html")
+
+@app.route("/report")
+def view_report():
+    parcel = request.args.get("parcel")
+    return render_template("report.html", parcel=parcel)
 
 @app.route("/api/geocode")
 def geocode():
-    # q = address string
     address = request.args.get("q", "").strip()
-    if not address:
-        return jsonify({"error": "address required (q param)"}), 400
-
-    params = {
-        "SingleLine": address,
-        "f": "json",
-        "outFields": "Match_addr,Addr_type"
-    }
-    r = requests.get(GEOCODE_URL, params=params, timeout=15)
-    r.raise_for_status()
-    return jsonify(r.json())
+    if not address: return jsonify({"error": "address required"}), 400
+    
+    params = {"SingleLine": address, "f": "json", "outFields": "Match_addr,Addr_type", "maxLocations": 1}
+    try:
+        r = requests.get(GEOCODE_URL, params=params, timeout=10)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/find_parcel")
 def find_parcel():
-    # Accept either parcel number (PAN) or lat/lon to find parcel
-    parcel = request.args.get("parcel")
+    """
+    Robust Parcel Search targeting Layer 2 (Taxlots).
+    """
+    parcel_input = request.args.get("parcel")
     lat = request.args.get("lat")
     lon = request.args.get("lon")
 
-    # ---- 1) by parcel id / PAN ----
-    if parcel:
-        # Try to query by PAN or PARCEL number field (try a few common fields)
-        where_clauses = [
-            f"PARCEL_NUMBER = '{parcel}'",
-            f"PAN = '{parcel}'",
-            f"TAXLOT = '{parcel}'",
-            f"PARCELID = '{parcel}'",
+    # --- SCENARIO A: Search by ID ---
+    if parcel_input:
+        # Clark County Taxlots (Layer 2) usually use 'SERIAL_NUM'
+        # We try both Number and String formats to be safe.
+        queries = [
+            f"SERIAL_NUM = {parcel_input}",      # Number
+            f"SERIAL_NUM = '{parcel_input}'",    # String
+            f"PropertyID = {parcel_input}",      # Backup Field
+            f"PARCELID = '{parcel_input}'"       # Backup Field
         ]
-        for where in where_clauses:
+
+        for where_clause in queries:
+            print(f"Trying Query on Layer 2: {where_clause}")
             params = {
-                "where": where,
+                "where": where_clause,
                 "outFields": "*",
                 "f": "json",
-                "geometryPrecision": 5,
-                "returnGeometry": "true",
+                "returnGeometry": "true"
             }
-            resp = requests.get(TAXLOTS_QUERY_URL, params=params, timeout=15)
-            if resp.ok:
-                data = resp.json()
-                if data.get("features"):
-                    return jsonify({"source_where": where, "result": data})
-        return jsonify({"error": "parcel not found in Taxlots layer"}), 404
+            try:
+                resp = requests.get(CLARK_GIS_TAXLOTS, params=params, timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("features"):
+                        print(f"✅ SUCCESS with: {where_clause}")
+                        return jsonify({"result": data})
+            except:
+                continue
+        
+        return jsonify({"error": "Parcel not found in Taxlots (Layer 2)."}), 404
 
-    # ---- 2) by lat/lon (from geocoder) ----
+    # --- SCENARIO B: Search by Lat/Lon ---
     if lat and lon:
-        try:
-            latf = float(lat)
-            lonf = float(lon)
-        except ValueError:
-            return jsonify({"error": "invalid lat/lon"}), 400
-
-        geom = {"x": lonf, "y": latf, "spatialReference": {"wkid": 4326}}
-
+        print(f"Searching Layer 2 at Lat/Lon: {lat}, {lon}")
+        geometry_string = f"{lon},{lat}"
+        
         params = {
-            "geometry": json.dumps(geom),          # << key fix: send JSON, not "x,y" string
+            "geometry": geometry_string,
             "geometryType": "esriGeometryPoint",
-            "inSR": 4326,
+            "inSR": "4326",
             "spatialRel": "esriSpatialRelIntersects",
             "outFields": "*",
             "f": "json",
-            "returnGeometry": "true",
+            "returnGeometry": "true"
         }
-        resp = requests.get(TAXLOTS_QUERY_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        return jsonify(resp.json())
+        
+        resp = requests.get(CLARK_GIS_TAXLOTS, params=params, timeout=10)
+        data = resp.json()
 
-    return jsonify({"error": "provide parcel OR lat & lon"}), 400
+        if data.get("features"):
+            # Normalize the ID for the frontend
+            feat = data['features'][0]
+            # Ensure we return a clean ID even if the field name varies
+            found_id = feat['attributes'].get('SERIAL_NUM') or feat['attributes'].get('PropertyID')
+            if found_id:
+                feat['attributes']['SERIAL_NUM'] = found_id # Standardize for frontend
+            
+            return jsonify({"result": data})
+        else:
+            return jsonify({"error": "No parcel found at this location"}), 404
 
-@app.route("/api/assessor_by_parcel")
-def assessor_by_parcel():
-    # Query assessor open-data feature service by parcel id or by geometry
-    parcel = request.args.get("parcel")
-    lat = request.args.get("lat")
-    lon = request.args.get("lon")
+    return jsonify({"error": "Provide parcel OR lat/lon"}), 400
 
-    if not parcel and (not lat or not lon):
-        return jsonify({"error": "provide parcel or lat+lon"}), 400
-
-    # Try parcel first if provided
-    if parcel:
-        where = f"PARCEL_ID = '{parcel}'"
-        params = {"where": where, "outFields": "*", "f": "json"}
-        # NOTE: ASSESSOR_FEATURE_URL placeholder must be updated to the real Clark County assessor feature service endpoint
-        resp = requests.get(ASSESSOR_FEATURE_URL, params=params, timeout=15)
-        if resp.ok and resp.json().get("features"):
-            return jsonify(resp.json())
-        # else fall through for lat/lon
-
-    if lat and lon:
-        try:
-            latf = float(lat)
-            lonf = float(lon)
-        except ValueError:
-            return jsonify({"error": "invalid lat/lon"}), 400
-
-        geom = {"x": lonf, "y": latf, "spatialReference": {"wkid": 4326}}
-        params = {
-            "geometry": json.dumps(geom),
-            "geometryType": "esriGeometryPoint",
-            "inSR": 4326,
-            "spatialRel": "esriSpatialRelIntersects",
-            "outFields": "*",
-            "f": "json",
-        }
-        resp = requests.get(TAXLOTS_QUERY_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        return jsonify(resp.json())
-
-    return jsonify({"error": "no assessor data found"}), 404
-
-# Simple helper to produce a recorded docs search link in Auditor system
 @app.route("/api/links")
 def links():
-    pan = request.args.get("pan") or request.args.get("parcel")
+    pan = request.args.get("parcel")
     out = {}
     if pan:
-        out["Property Information Center (PIC)"] = make_pic_link(pan)
+        out["Property Information Center (PIC)"] = f"https://property.clark.wa.gov/?parcel={pan}"
         out["MapsOnline"] = f"https://gis.clark.wa.gov/mapsonline/?parcel={pan}"
-        out["Recorded Documents (Auditor)"] = (
-            f"https://e-docs.clark.wa.gov/LandmarkWeb/?query={pan}"
-        )
-    else:
-        out["Property Information Center (PIC)"] = "https://property.clark.wa.gov"
+        out["Recorded Documents (Auditor)"] = f"https://e-docs.clark.wa.gov/LandmarkWeb/?query={pan}"
+        out["Generate Zonda Report"] = f"/report?parcel={pan}" 
     return jsonify(out)
 
-# ---- app startup with auto free port ----
+@app.route("/api/generate_report_data")
+def generate_report_data():
+    parcel_id = request.args.get("parcel")
+    
+    # Direct Query on Layer 2
+    params = {"where": f"SERIAL_NUM = {parcel_id}", "outFields": "*", "f": "json"}
+    resp = requests.get(CLARK_GIS_TAXLOTS, params=params)
+    data = resp.json()
+    
+    if not data.get("features"):
+         return jsonify({"error": "Data not found"}), 404
+
+    attrs = data['features'][0]['attributes']
+    zip_code = str(attrs.get('ZipCode', '98607')).split('-')[0]
+    
+    report = {
+        "project": {
+            "name": attrs.get('SiteAddress') or attrs.get('SitusAddress', 'Unknown'),
+            "city": attrs.get('City', 'Vancouver'),
+            "zip": zip_code,
+            "builder": "Wollam Custom (Mock)",
+            "status": "Active"
+        },
+        "metrics": {
+            "price": format_currency(attrs.get('SalePrice')),
+            "sqft": f"{attrs.get('BldgSqFt', 0):,.0f}",
+            "price_sqft": round(attrs.get('SalePrice', 0) / attrs.get('BldgSqFt', 1)) if attrs.get('BldgSqFt') else 0,
+            "lot_size": f"{attrs.get('LandAcres', 0)} acres",
+            "year_built": attrs.get('YearBuilt', 'N/A')
+        },
+        "demographics": get_demographics(zip_code),
+        "location": {
+            "lat": 45.63, "lon": -122.65 
+        }
+    }
+    # Add geometry if available
+    if 'geometry' in data['features'][0]:
+        report['location']['lat'] = data['features'][0]['geometry'].get('y', 45.63)
+        report['location']['lon'] = data['features'][0]['geometry'].get('x', -122.65)
+
+    return jsonify(report)
+
 if __name__ == "__main__":
-    def find_free_port(start=5000, end=5010):
-        for port in range(start, end + 1):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(("localhost", port)) != 0:
-                    return port
-        raise RuntimeError("No free ports available in range.")
-
-    env_port = os.environ.get("PORT")
-    if env_port:
-        port = int(env_port)
-    else:
-        port = find_free_port()
-
-    print(f"\n🚀 Starting server on http://localhost:{port}\n")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)
