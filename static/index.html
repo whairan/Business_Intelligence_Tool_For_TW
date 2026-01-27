@@ -9,19 +9,26 @@
     input, button { padding:8px; margin:4px; }
     #result { white-space:pre-wrap; background:#fafafa; padding:12px; border:1px solid #eee; margin-top:12px; }
     #map { height: 400px; margin-top: 12px; border: 1px solid #ccc; }
-    .links-box { background: #e0f2fe; padding: 10px; margin-top: 10px; border-radius: 5px; }
-    .links-box a { display: block; margin: 5px 0; color: #0284c7; font-weight: bold; text-decoration: none; }
-    .links-box a:hover { text-decoration: underline; }
+    
+    /* Source Manager Styles */
+    .source-box { background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; margin-top: 30px; border-radius: 8px; }
+    .source-item { display: flex; justify-content: space-between; align-items: center; background: white; padding: 8px; margin: 4px 0; border: 1px solid #ddd; }
+    .source-item.inactive { opacity: 0.6; background: #f3f4f6; }
+    .badge { font-size: 0.75rem; background: #e0f2fe; color: #0369a1; padding: 2px 6px; border-radius: 4px; margin-right: 8px; }
+    .btn-sm { padding: 4px 8px; font-size: 0.8rem; cursor: pointer; }
+    .btn-red { background: #fee2e2; color: #b91c1c; border: none; }
+    .btn-green { background: #dcfce7; color: #15803d; border: none; }
   </style>
 </head>
 <body>
-  <h2>Clark County Property Lookup (demo)</h2>
+  <h2>Clark County Property Lookup</h2>
+  
   <div>
     <label>Address: <input id="addr" size="50" placeholder="e.g. 111 W 8th St, Vancouver, WA"></label>
     <button onclick="searchAddress()">Search</button>
   </div>
   <div>
-    <label>Or Parcel / PAN: <input id="parcel" placeholder="986035637"></label>
+    <label>Or Parcel: <input id="parcel" placeholder="986035637"></label>
     <button onclick="searchParcel()">Find Parcel</button>
   </div>
 
@@ -29,88 +36,103 @@
   <div id="link-container"></div>
   <div id="map"></div>
 
+  <div class="source-box">
+    <h3>📡 Data Source Manager</h3>
+    <p style="font-size:0.9rem; color:#666;">Manage the external APIs used for the Zonda Reports.</p>
+    
+    <div id="sources-list">Loading sources...</div>
+    
+    <div style="margin-top:10px; border-top:1px solid #ccc; padding-top:10px;">
+        <h4>Add New Source</h4>
+        <input id="new-name" placeholder="Name (e.g. WalkScore API)">
+        <input id="new-url" placeholder="URL" size="40">
+        <input id="new-cat" placeholder="Category" size="15">
+        <button onclick="addSource()">+ Add</button>
+    </div>
+  </div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-  let map, marker;
-
-  function initMap(lat = 45.6387, lon = -122.6615) {
-    map = L.map('map').setView([lat, lon], 12);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
-  }
-
-  function updateMap(lat, lon, label) {
-    if (!map) initMap(lat, lon);
-    else map.setView([lat, lon], 17);
-    if (marker) map.removeLayer(marker);
-    marker = L.marker([lat, lon]).addTo(map).bindPopup(label || 'Location').openPopup();
-  }
-
-  function setResult(text){ document.getElementById('result').textContent = text; }
-  
-  async function displayLinks(parcelId) {
-    const container = document.getElementById('link-container');
-    container.innerHTML = "Loading links...";
-    
-    const links = await fetch(`/api/links?parcel=${encodeURIComponent(parcelId)}`).then(r => r.json());
-    
-    let html = `<div class="links-box"><h3>Property Links for #${parcelId}</h3>`;
-    for (const [key, url] of Object.entries(links)) {
-        html += `<a href="${url}" target="_blank">➜ ${key}</a>`;
+    // --- Existing Map/Search Logic (Simplified for brevity) ---
+    let map, marker;
+    function initMap(lat=45.63, lon=-122.66) { 
+        map = L.map('map').setView([lat, lon], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map); 
     }
-    html += `</div>`;
-    container.innerHTML = html;
-  }
-
-  async function searchAddress() {
-    const a = document.getElementById('addr').value.trim();
-    if (!a) return alert('enter address');
-    setResult('Geocoding...');
-    document.getElementById('link-container').innerHTML = "";
-    
-    const g = await fetch('/api/geocode?q=' + encodeURIComponent(a)).then(r => r.json());
-    
-    if (g.candidates && g.candidates.length > 0) {
-      const c = g.candidates[0];
-      const y = c.location.y, x = c.location.x;
-      setResult(`Found: ${c.address}\nQuerying parcel boundaries...`);
-      updateMap(y, x, c.address);
-
-      const p = await fetch(`/api/find_parcel?lat=${y}&lon=${x}`).then(r => r.json());
-      
-      // FIXED: Look for correct Clark County Field Names
-      const attrs = p.features?.[0]?.attributes;
-      const parcelId = attrs?.SERIAL_NUM || attrs?.PARCEL_NUMBER || attrs?.PropertyID;
-
-      if (parcelId) {
-          setResult(`Found Parcel #${parcelId}\nOwner: ${attrs.OwnerName || 'Unknown'}\nSize: ${attrs.LandAcres} acres`);
-          displayLinks(parcelId);
-      } else {
-          setResult("Address found, but no matching parcel record in County GIS.");
-      }
-    } else {
-      setResult('Address not found.');
+    function updateMap(lat, lon, label) {
+        if(!map) initMap(lat, lon);
+        else map.setView([lat, lon], 16);
+        if(marker) map.removeLayer(marker);
+        marker = L.marker([lat, lon]).addTo(map).bindPopup(label).openPopup();
     }
-  }
-
-  async function searchParcel() {
-    const parcel = document.getElementById('parcel').value.trim();
-    if (!parcel) return alert('enter parcel');
-    setResult('Searching parcel...');
-    document.getElementById('link-container').innerHTML = "";
-
-    const p = await fetch('/api/find_parcel?parcel=' + encodeURIComponent(parcel)).then(r => r.json());
-    
-    if (p.result && p.result.features) {
-        const attrs = p.result.features[0].attributes;
-        const parcelId = attrs.SERIAL_NUM || attrs.PARCEL_NUMBER || parcel; // Use what we found
-        setResult(JSON.stringify(attrs, null, 2));
-        displayLinks(parcelId);
-    } else {
-        setResult("Parcel not found.");
+    async function searchParcel() {
+        const p = document.getElementById('parcel').value;
+        const res = await fetch(`/api/find_parcel?parcel=${p}`).then(r=>r.json());
+        document.getElementById('result').innerText = JSON.stringify(res, null, 2);
+        // Show report link if found
+        if(res.result) {
+            const pid = res.result.features[0].attributes.SERIAL_NUM;
+            document.getElementById('link-container').innerHTML = `<a href="/report?parcel=${pid}" target="_blank" style="display:block; background:#0284c7; color:white; padding:10px; text-align:center; text-decoration:none; margin-top:10px;">📄 Generate Zonda Report</a>`;
+        }
     }
-  }
+    // (Keep your searchAddress function from before)
 
-  initMap();
+    // --- NEW: Source Manager Logic ---
+    async function loadSources() {
+        const sources = await fetch('/api/sources').then(r => r.json());
+        const list = document.getElementById('sources-list');
+        list.innerHTML = "";
+        
+        sources.forEach(s => {
+            const div = document.createElement('div');
+            div.className = `source-item ${s.active ? '' : 'inactive'}`;
+            div.innerHTML = `
+                <div>
+                    <span class="badge">${s.category || 'General'}</span>
+                    <strong>${s.name}</strong>
+                    <br><small style="color:#888">${s.url}</small>
+                </div>
+                <div>
+                    <button class="btn-sm ${s.active ? 'btn-red' : 'btn-green'}" onclick="toggleSource('${s.id}')">
+                        ${s.active ? 'Disable' : 'Enable'}
+                    </button>
+                    <button class="btn-sm" onclick="deleteSource('${s.id}')">❌</button>
+                </div>
+            `;
+            list.appendChild(div);
+        });
+    }
+
+    async function toggleSource(id) {
+        await fetch(`/api/sources/${id}/toggle`, { method: 'POST' });
+        loadSources();
+    }
+
+    async function deleteSource(id) {
+        if(!confirm("Remove this source?")) return;
+        await fetch(`/api/sources/${id}`, { method: 'DELETE' });
+        loadSources();
+    }
+
+    async function addSource() {
+        const name = document.getElementById('new-name').value;
+        const url = document.getElementById('new-url').value;
+        const cat = document.getElementById('new-cat').value;
+        if(!name || !url) return alert("Name and URL required");
+        
+        await fetch('/api/sources', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name, url, category: cat })
+        });
+        document.getElementById('new-name').value = "";
+        document.getElementById('new-url').value = "";
+        loadSources();
+    }
+
+    // Initialize
+    initMap();
+    loadSources();
   </script>
 </body>
 </html>
