@@ -1,37 +1,37 @@
 [
-    {
-      "id": "clark_permits",
-      "name": "Clark County Building Permits",
-      "url": "https://hub-clarkcountywa.opendata.arcgis.com/datasets/clark-county-building-permits",
-      "category": "Future Supply",
-      "active": true
-    },
-    {
-      "id": "wa_ospi_schools",
-      "name": "WA OSPI School Report Card",
-      "url": "https://data.wa.gov/education/Report-Card-Assessment-Data-2022-23/3mpj-392y",
-      "category": "Schools",
-      "active": true
-    },
-    {
-      "id": "waspc_crime",
-      "name": "WASPC Crime Statistics",
-      "url": "https://www.waspc.org/cjis-statistics---reports",
-      "category": "Safety",
-      "active": true
-    },
-    {
-      "id": "ctran_gtfs",
-      "name": "C-TRAN Transit Data (GTFS)",
-      "url": "https://www.c-tran.com/about-c-tran/business/c-tran-gtfs-data",
-      "category": "Transit",
-      "active": false
-    },
-    {
-      "id": "wa_ofm_pop",
-      "name": "WA OFM Population Forecast",
-      "url": "https://ofm.wa.gov/washington-data-research/population-demographics/population-estimates/small-area-estimates-program",
-      "category": "Demographics",
-      "active": true
-    }
-  ]
+  {
+    "id": "clark_permits",
+    "name": "Clark County Building Permits",
+    "url": "https://hub-clarkcountywa.opendata.arcgis.com/datasets/clark-county-building-permits",
+    "category": "Future Supply",
+    "active": true
+  },
+  {
+    "id": "wa_ospi_schools",
+    "name": "WA OSPI School Report Card",
+    "url": "https://data.wa.gov/education/Report-Card-Assessment-Data-2022-23/3mpj-392y",
+    "category": "Schools",
+    "active": true
+  },
+  {
+    "id": "waspc_crime",
+    "name": "WASPC Crime Statistics",
+    "url": "https://www.waspc.org/cjis-statistics---reports",
+    "category": "Safety",
+    "active": true
+  },
+  {
+    "id": "ctran_gtfs",
+    "name": "C-TRAN Transit Data (GTFS)",
+    "url": "https://www.c-tran.com/about-c-tran/business/c-tran-gtfs-data",
+    "category": "Transit",
+    "active": true
+  },
+  {
+    "id": "wa_ofm_pop",
+    "name": "WA OFM Population Forecast",
+    "url": "https://ofm.wa.gov/washington-data-research/population-demographics/population-estimates/small-area-estimates-program",
+    "category": "Demographics",
+    "active": true
+  }
+]

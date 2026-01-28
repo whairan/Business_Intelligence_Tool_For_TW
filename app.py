@@ -14,7 +14,7 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 # 1. CONFIGURATION & FILE PATHS
 # ==========================================
 
-DATA_SOURCES_FILE = "data_sources.json"
+DATA_SOURCES_FILE = "sources.json"
 GEOCODE_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
 CLARK_GIS_TAXLOTS = "https://gis.clark.wa.gov/arcgisfed2/rest/services/MapsOnline/LandRecords/MapServer/2/query"
 DATA_COMMONS_API = "https://api.datacommons.org/stat/series"
@@ -184,4 +184,4 @@ def generate_report_data():
     return jsonify(report)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)
