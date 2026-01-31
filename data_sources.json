@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "name": "zillow scraper ",
+    "url": "zillow.com",
+    "category": "Custom",
+    "id": "1",
+    "active": false
+  }
+]
