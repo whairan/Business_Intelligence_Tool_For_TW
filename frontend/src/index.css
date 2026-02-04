@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Make the map fill the screen */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* Fix Leaflet map z-index issues */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+  z-index: 1;
+}

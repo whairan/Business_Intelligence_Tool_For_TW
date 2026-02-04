@@ -1,2 +1,10 @@
 Proj_Proposal
 debu_gis.py
+temp_data
+node_modules/
+backend/temp_data/
+backend/venv/
+__pycache__/
+*.DS_Store
+*.zip
+*.shp

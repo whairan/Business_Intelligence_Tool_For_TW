@@ -1,114 +1,107 @@
 import os
-import requests
 import zipfile
 import shutil
-from io import BytesIO
 import geopandas as gpd
 import pandas as pd
 from sqlalchemy import create_engine, text
-from tqdm import tqdm
+from dotenv import load_dotenv 
+
+# 1. Load Environment Variables
+env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
+load_dotenv(dotenv_path=env_path)
 
 # --- CONFIGURATION ---
-# Clark County GIS Open Data (Taxlots / Parcels)
-# Note: This URL is the direct bulk download. If it changes, check: https://hub-clarkcountywa.opendata.arcgis.com/
-DATA_URL = "https://gis.clark.wa.gov/gishome/dataset/download/Taxlots.zip"
 DOWNLOAD_DIR = "./temp_data"
-SHAPEFILE_NAME = "Taxlots.shp"  # The file inside the zip
+ZIP_FILE_NAME = "Taxlots.zip" 
+ZIP_PATH = os.path.join(DOWNLOAD_DIR, ZIP_FILE_NAME)
 
-# Database Connection (Matches your docker-compose & .env)
-# If running outside docker, use localhost. If inside, use 'db'.
+# Database Connection
 DB_USER = os.getenv("POSTGRES_USER", "admin")
 DB_PASS = os.getenv("POSTGRES_PASSWORD", "password123")
-DB_HOST = "localhost" 
+DB_HOST = "localhost"
 DB_PORT = "5432"
 DB_NAME = os.getenv("POSTGRES_DB", "clark_county_db")
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# Column Mapping (Shapefile Column -> Database Column)
+# --- CRITICAL UPDATE: NEW COLUMN MAPPING ---
+# Maps "Shapefile Column Name" -> "Your Database Column Name"
 COLUMN_MAPPING = {
-    "SERIAL_NUM": "parcel_id",    # The APN
-    "SITEADDR": "site_address",
-    "OWNER": "owner_name",
-    "LANDVAL": "land_value",
-    "BLDGVAL": "building_value",
-    "YRBUILT": "year_built",
-    "ACRES": "acres",
-    "ZONING": "zoning_code"
-    # "geometry" is handled automatically by GeoPandas
+    "prop_id": "parcel_id",       # The Unique ID
+    "SitusAddrs": "site_address", # Full Address
+    "MainOwnerI": "owner_name",   # Owner Name
+    "MktLandVal": "land_value",   # Market Land Value
+    "MktBldgVal": "building_value", # Market Building Value
+    "BldgYrBlt": "year_built",    # Year Built
+    "GISAc": "acres",             # GIS Calculated Acres
+    "Zone1": "zoning_code"        # Zoning Code
 }
 
-def download_and_extract():
-    """Downloads the zip file and extracts the shapefile."""
-    if not os.path.exists(DOWNLOAD_DIR):
-        os.makedirs(DOWNLOAD_DIR)
-
-    print(f"⬇️  Downloading data from {DATA_URL}...")
-    response = requests.get(DATA_URL, stream=True)
-    
-    if response.status_code != 200:
-        raise Exception(f"Failed to download: {response.status_code}")
-
-    # Unzip
-    with zipfile.ZipFile(BytesIO(response.content)) as z:
-        print("📂 Extracting files...")
-        z.extractall(DOWNLOAD_DIR)
-    
-    print("✅ Download complete.")
-
 def process_and_load():
-    """Reads shapefile, transforms CRS, and loads to DB."""
-    shp_path = os.path.join(DOWNLOAD_DIR, SHAPEFILE_NAME)
+    if not os.path.exists(ZIP_PATH):
+        print(f"❌ Error: Could not find {ZIP_PATH}")
+        return
+
+    print(f"📂 Found manual file: {ZIP_PATH}")
     
-    if not os.path.exists(shp_path):
-        # Fallback: sometimes the zip structure varies, find the first .shp
-        for root, dirs, files in os.walk(DOWNLOAD_DIR):
-            for file in files:
-                if file.endswith(".shp"):
-                    shp_path = os.path.join(root, file)
-                    break
+    with zipfile.ZipFile(ZIP_PATH, 'r') as z:
+        z.extractall(DOWNLOAD_DIR)
+
+    # 2. Find the Shapefile
+    shp_path = None
+    for root, dirs, files in os.walk(DOWNLOAD_DIR):
+        for file in files:
+            if "taxlot" in file.lower() and file.endswith(".shp"):
+                shp_path = os.path.join(root, file)
+                print(f"✅ Found Correct Shapefile: {file}")
+                break
     
-    print(f"📖 Reading Shapefile: {shp_path}...")
+    if not shp_path:
+        print("❌ Error: No 'Taxlots' shapefile found.")
+        return
+
+    print(f"📖 Reading Shapefile (this takes time)...")
     gdf = gpd.read_file(shp_path)
     
-    # 1. Coordinate Transformation (CRITICAL)
-    # Clark County data is usually EPSG:2927 (NAD83 / WA South).
-    # We MUST convert to EPSG:4326 (Lat/Lon) for Mapbox/PostGIS default.
-    if gdf.crs.to_string() != "EPSG:4326":
-        print("🔄 Reprojecting to WGS84 (Lat/Lon)...")
+    # 3. Coordinate Transformation
+    if gdf.crs and gdf.crs.to_string() != "EPSG:4326":
+        print(f"🔄 Reprojecting to WGS84...")
         gdf = gdf.to_crs(epsg=4326)
 
-    # 2. Rename Columns
+    # 4. Clean & Rename
     print("🧹 Cleaning data...")
-    # Keep only columns we mapped + geometry
-    keep_cols = list(COLUMN_MAPPING.keys()) + ['geometry']
-    # Filter only existing columns (avoid crash if schema changed)
-    existing_cols = [c for c in keep_cols if c in gdf.columns]
-    gdf = gdf[existing_cols]
     
-    # Rename to match our DB schema
+    # Identify which columns from our mapping actually exist in the file
+    existing_source_cols = [c for c in COLUMN_MAPPING.keys() if c in gdf.columns]
+    
+    if not existing_source_cols:
+        print(f"❌ CRITICAL ERROR: No matching columns found. Expected: {list(COLUMN_MAPPING.keys())}")
+        print(f"   Found in file: {gdf.columns.tolist()[:10]}...")
+        return
+
+    # Filter to keep only the columns we want + geometry
+    gdf = gdf[existing_source_cols + ['geometry']]
+    
+    # Rename them to match the database schema
     gdf = gdf.rename(columns=COLUMN_MAPPING)
     
-    # 3. Data Type Cleaning
-    # Convert 'nan' owner names to None (NULL in SQL)
+    # Convert 'nan' to SQL NULL
     gdf = gdf.where(pd.notnull(gdf), None)
 
-    # 4. Connect to DB
+    # 5. Load to DB
     engine = create_engine(DATABASE_URL)
-    
     print(f"🚀 Loading {len(gdf)} parcels into PostGIS...")
     
-    # We use 'append' but chunks are recommended for 100k+ rows
-    # GeoPandas to_postgis is slower but easiest to implement.
+    # We use chunksize to prevent memory crashes on 190k rows
     gdf.to_postgis(
         "parcels", 
         engine, 
-        if_exists="replace", # WARNING: This wipes existing data. Use 'append' for updates.
+        if_exists="replace", 
         index=False,
         dtype={'geometry': 'Geometry("MULTIPOLYGON", srid=4326)'},
-        chunksize=1000  # Process in batches
+        chunksize=1000
     )
     
-    # 5. Restore Indexes (replace drops them)
+    # 6. Restore Index
     with engine.connect() as conn:
         print("⚡ Re-creating Spatial Index...")
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_parcels_geom ON parcels USING GIST (geometry);"))
@@ -116,10 +109,6 @@ def process_and_load():
         conn.commit()
 
     print("✅ Success! Database populated.")
-    
-    # Cleanup
-    shutil.rmtree(DOWNLOAD_DIR)
 
 if __name__ == "__main__":
-    download_and_extract()
     process_and_load()
