@@ -1,96 +1,85 @@
-import json
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
-from typing import Any
-
+from sqlalchemy import text
 from app.db.session import get_db
-from app.schemas.parcel import LassoRequest, AreaAnalysisResponse, ParcelResponse
-from app.models.parcel import Parcel
+from pydantic import BaseModel
+from typing import List, Optional
+import json
 
 router = APIRouter()
 
-@router.post("/analyze", response_model=AreaAnalysisResponse)
-async def analyze_area(
-    lasso: LassoRequest, 
-    db: Session = Depends(get_db)
-) -> Any:
-    """
-    Receives a GeoJSON polygon.
-    Returns all parcels intersecting that polygon + aggregate stats.
-    """
-    
-    # 1. Convert Pydantic model to raw GeoJSON string for PostGIS
-    geojson_str = json.dumps(lasso.dict())
+# --- Request Models ---
+class GeometryRequest(BaseModel):
+    type: str
+    coordinates: List[List[List[float]]]
 
-    # 2. The Spatial Query
-    # ST_Intersects: Finds overlap
-    # ST_AsGeoJSON: Converts DB geometry back to JSON for the frontend
+# --- Endpoints ---
+
+@router.post("/analyze")
+def analyze_area(
+    geo_request: GeometryRequest, 
+    db: Session = Depends(get_db)
+):
+    """
+    Analyze parcels within a drawn polygon.
+    """
+    # Convert the Pydantic model to a GeoJSON string for PostGIS
+    geojson_str = json.dumps(geo_request.dict())
+    
+    # CORRECTED SQL: 
+    # 1. Calculates 'total_value' on the fly (since the column doesn't exist)
+    # 2. Removed 'investment_score' (since it doesn't exist yet)
     query = text("""
         SELECT 
-            id, parcel_id, site_address, owner_name, zoning_code, 
-            total_value, acres, investment_score,
-            ST_AsGeoJSON(geometry) as geometry_json
-        FROM parcels
-        WHERE ST_Intersects(
-            geometry, 
-            ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)
-        )
-        LIMIT 200; 
+            parcel_id, 
+            site_address, 
+            owner_name, 
+            zoning_code,
+            land_value, 
+            building_value, 
+            (COALESCE(land_value, 0) + COALESCE(building_value, 0)) AS total_value,
+            year_built, 
+            acres,
+            ST_AsGeoJSON(geometry) as geometry
+        FROM parcels 
+        WHERE ST_Intersects(geometry, ST_GeomFromGeoJSON(:geojson))
+        LIMIT 500;
     """)
     
-    # Execute query
-    result = db.execute(query, {"geojson": geojson_str}).fetchall()
+    try:
+        results = db.execute(query, {"geojson": geojson_str}).fetchall()
+    except Exception as e:
+        print(f"❌ Database Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-    if not result:
-        return {
-            "parcels": [],
-            "total_parcels": 0,
-            "average_score": 0.0,
-            "total_acreage": 0.0,
-            "ai_summary": "No parcels found in this selection."
-        }
-
-    # 3. Process Results
     parcels_data = []
-    total_score = 0
     total_acres = 0
-
-    for row in result:
-        # Deserialize the geometry string from DB
-        geom = json.loads(row.geometry_json)
+    total_value = 0
+    
+    for row in results:
+        # Convert row to dict
+        p = dict(row._mapping)
         
-        parcels_data.append(ParcelResponse(
-            parcel_id=row.parcel_id,
-            address=row.site_address,
-            owner_name=row.owner_name,
-            zoning_code=row.zoning_code,
-            total_value=row.total_value,
-            acres=row.acres,
-            investment_score=row.investment_score,
-            geometry=geom
-        ))
+        # Parse GeoJSON string so React can read it
+        if p['geometry']:
+            p['geometry'] = json.loads(p['geometry'])
+            
+        parcels_data.append(p)
         
         # Aggregate Stats
-        if row.investment_score:
-            total_score += float(row.investment_score)
-        if row.acres:
-            total_acres += float(row.acres)
+        if p['acres']:
+            total_acres += float(p['acres'])
+        if p['total_value']:
+            total_value += float(p['total_value'])
 
-    # 4. Final Aggregation
-    avg_score = total_score / len(result) if result else 0
-    
     return {
-        "parcels": parcels_data,
         "total_parcels": len(parcels_data),
-        "average_score": round(avg_score, 2),
-        "total_acreage": round(total_acres, 2),
-        "ai_summary": f"Identified {len(parcels_data)} lots. Dominant zoning appears to be Residential." 
-        # ^ In the next step, we will replace this string with a call to OpenAI.
+        "total_acreage": total_acres,
+        "total_value": total_value,
+        "average_score": 7.5, # Placeholder until we build the AI model
+        "parcels": parcels_data,
+        "ai_summary": f"Analyzed {len(parcels_data)} parcels. The data is now loading correctly from the database."
     }
-
-import json
-from fastapi import Query
 
 @router.get("/lookup")
 def lookup_parcel(
@@ -101,27 +90,35 @@ def lookup_parcel(
     """
     Find a single parcel by clicking coordinates (Lat/Lng).
     """
-    # PostGIS Magic: ST_Contains checks if the click Point is inside any Parcel Polygon
+    # CORRECTED SQL for Lookup
     query = text("""
         SELECT 
-            parcel_id, site_address, owner_name, zoning_code,
-            land_value, building_value, total_value, year_built, acres,
+            parcel_id, 
+            site_address, 
+            owner_name, 
+            zoning_code,
+            land_value, 
+            building_value, 
+            (COALESCE(land_value, 0) + COALESCE(building_value, 0)) AS total_value,
+            year_built, 
+            acres,
             ST_AsGeoJSON(geometry) as geometry
         FROM parcels 
         WHERE ST_Contains(geometry, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326))
         LIMIT 1;
     """)
     
-    result = db.execute(query, {"lat": lat, "lng": lng}).fetchone()
+    try:
+        result = db.execute(query, {"lat": lat, "lng": lng}).fetchone()
+    except Exception as e:
+        print(f"❌ Database Error in Lookup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     
     if not result:
-        # It's okay if they click the street or water
         return {"found": False, "message": "No parcel found here"}
         
-    # Convert database row to a clean dictionary
     parcel = dict(result._mapping)
     
-    # Parse the GeoJSON string so React can use it
     if parcel['geometry']:
         parcel['geometry'] = json.loads(parcel['geometry'])
         
