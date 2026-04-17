@@ -185,4 +185,4 @@ fly deploy
 
 ## 📜 License
 
-Proprietary - Internal Business Use Only.
+Proprietary - Internal Business Use Only. Nah, jk. This is the demo verion. you can use it if you need it. credit me tho.
